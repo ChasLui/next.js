@@ -3,6 +3,8 @@ import { FileRef, nextTestSetup } from 'e2e-utils'
 import { outdent } from 'outdent'
 import path from 'path'
 
+const isRspack = process.env.NEXT_RSPACK !== undefined
+
 describe('ReactRefreshLogBox _app _document', () => {
   const { isTurbopack, next } = nextTestSetup({
     files: new FileRef(path.join(__dirname, 'fixtures', 'default-template')),
@@ -17,17 +19,13 @@ describe('ReactRefreshLogBox _app _document', () => {
     const { browser, session } = sandbox
     await expect(browser).toDisplayRedbox(`
      {
-       "count": 1,
-       "description": "Error: The default export is not a React Component in page: "/_app"",
+       "description": "The default export is not a React Component in page: "/_app"",
        "environmentLabel": null,
        "label": "Runtime Error",
        "source": null,
        "stack": [],
      }
     `)
-    expect(await session.getRedboxDescription()).toMatchInlineSnapshot(
-      `"Error: The default export is not a React Component in page: "/_app""`
-    )
 
     await session.patch(
       'pages/_app.js',
@@ -38,7 +36,7 @@ describe('ReactRefreshLogBox _app _document', () => {
         export default MyApp
       `
     )
-    await session.assertNoRedbox()
+    await session.waitForNoRedbox()
   })
 
   test('empty _document shows logbox', async () => {
@@ -50,8 +48,7 @@ describe('ReactRefreshLogBox _app _document', () => {
 
     await expect(browser).toDisplayRedbox(`
      {
-       "count": 1,
-       "description": "Error: The default export is not a React Component in page: "/_document"",
+       "description": "The default export is not a React Component in page: "/_document"",
        "environmentLabel": null,
        "label": "Runtime Error",
        "source": null,
@@ -86,7 +83,7 @@ describe('ReactRefreshLogBox _app _document', () => {
         export default MyDocument
       `
     )
-    await session.assertNoRedbox()
+    await session.waitForNoRedbox()
   })
 
   test('_app syntax error shows logbox', async () => {
@@ -109,22 +106,50 @@ describe('ReactRefreshLogBox _app _document', () => {
     if (isTurbopack) {
       await expect(browser).toDisplayRedbox(`
        {
-         "count": 1,
-         "description": "Parsing ecmascript source code failed",
+         "description": "Expression expected",
          "environmentLabel": null,
          "label": "Build Error",
-         "source": "./pages/_app.js (2:11)
-       Parsing ecmascript source code failed
+         "source": "./pages/_app.js (2:10)
+       Error: Expression expected
        > 2 |   return <<Component {...pageProps} />;
-           |           ^",
+           |          ^^",
+         "stack": [],
+       }
+      `)
+    } else if (isRspack) {
+      await expect({ browser, next }).toDisplayRedbox(`
+       {
+         "description": "  ╰─▶   × Error:   x Expression expected",
+         "environmentLabel": null,
+         "label": "Build Error",
+         "source": "./pages/_app.js
+         ╰─▶   × Error:   x Expression expected
+               │    ,-[2:1]
+               │  1 | function MyApp({ Component, pageProps }) {
+               │  2 |   return <<Component {...pageProps} />;
+               │    :          ^^
+               │  3 | }
+               │  4 | export default MyApp
+               │    \`----
+               │   x Expected ';', got '{'
+               │    ,-[2:1]
+               │  1 | function MyApp({ Component, pageProps }) {
+               │  2 |   return <<Component {...pageProps} />;
+               │    :                      ^
+               │  3 | }
+               │  4 | export default MyApp
+               │    \`----
+               │
+               │
+               │ Caused by:
+               │     Syntax Error",
          "stack": [],
        }
       `)
     } else {
       await expect(browser).toDisplayRedbox(`
        {
-         "count": 1,
-         "description": "Error:   x Expression expected",
+         "description": "  x Expression expected",
          "environmentLabel": null,
          "label": "Build Error",
          "source": "./pages/_app.js
@@ -132,15 +157,15 @@ describe('ReactRefreshLogBox _app _document', () => {
           ,-[2:1]
         1 | function MyApp({ Component, pageProps }) {
         2 |   return <<Component {...pageProps} />;
-          :           ^
+          :          ^^
         3 | }
         4 | export default MyApp
           \`----
-         x Expression expected
+         x Expected ';', got '{'
           ,-[2:1]
         1 | function MyApp({ Component, pageProps }) {
         2 |   return <<Component {...pageProps} />;
-          :            ^^^^^^^^^
+          :                      ^
         3 | }
         4 | export default MyApp
           \`----
@@ -160,7 +185,7 @@ describe('ReactRefreshLogBox _app _document', () => {
         export default MyApp
       `
     )
-    await session.assertNoRedbox()
+    await session.waitForNoRedbox()
   })
 
   test('_document syntax error shows logbox', async () => {
@@ -200,22 +225,44 @@ describe('ReactRefreshLogBox _app _document', () => {
     if (isTurbopack) {
       await expect(browser).toDisplayRedbox(`
        {
-         "count": 1,
-         "description": "Parsing ecmascript source code failed",
+         "description": "Unexpected token \`{\`. Expected identifier, string literal, numeric literal or [ for the computed key",
          "environmentLabel": null,
          "label": "Build Error",
          "source": "./pages/_document.js (3:36)
-       Parsing ecmascript source code failed
+       Error: Unexpected token \`{\`. Expected identifier, string literal, numeric literal or [ for the computed key
        > 3 | class MyDocument extends Document {{
            |                                    ^",
+         "stack": [],
+       }
+      `)
+    } else if (isRspack) {
+      await expect({ browser, next }).toDisplayRedbox(`
+       {
+         "description": "  ╰─▶   × Error:   x Unexpected token \`{\`. Expected identifier, string literal, numeric literal or [ for the computed key",
+         "environmentLabel": null,
+         "label": "Build Error",
+         "source": "./pages/_document.js
+         ╰─▶   × Error:   x Unexpected token \`{\`. Expected identifier, string literal, numeric literal or [ for the computed key
+               │    ,-[3:1]
+               │  1 | import Document, { Html, Head, Main, NextScript } from 'next/document'
+               │  2 |
+               │  3 | class MyDocument extends Document {{
+               │    :                                    ^
+               │  4 |   static async getInitialProps(ctx) {
+               │  5 |     const initialProps = await Document.getInitialProps(ctx)
+               │  6 |     return { ...initialProps }
+               │    \`----
+               │
+               │
+               │ Caused by:
+               │     Syntax Error",
          "stack": [],
        }
       `)
     } else {
       await expect(browser).toDisplayRedbox(`
        {
-         "count": 1,
-         "description": "Error:   x Unexpected token \`{\`. Expected identifier, string literal, numeric literal or [ for the computed key",
+         "description": "  x Unexpected token \`{\`. Expected identifier, string literal, numeric literal or [ for the computed key",
          "environmentLabel": null,
          "label": "Build Error",
          "source": "./pages/_document.js
@@ -263,6 +310,6 @@ describe('ReactRefreshLogBox _app _document', () => {
         export default MyDocument
       `
     )
-    await session.assertNoRedbox()
+    await session.waitForNoRedbox()
   })
 })

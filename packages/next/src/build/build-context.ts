@@ -75,6 +75,7 @@ export const NextBuildContext: Partial<{
   previewProps: __ApiPreviewProps
   mappedPages: MappedPages | undefined
   mappedAppPages: MappedPages | undefined
+  mappedAppDefaults: MappedPages | undefined
   mappedRootPaths: MappedPages
   hasInstrumentationHook: boolean
 
@@ -93,4 +94,11 @@ export const NextBuildContext: Partial<{
   previewModeId: string
   fetchCacheKeyPrefix?: string
   allowedRevalidateHeaderKeys?: string[]
+  isCompileMode?: boolean
+  debugPrerender: boolean
+  analyze: boolean
+  debugBuildPaths?: {
+    app: string[]
+    pages: string[]
+  }
 }> = {}

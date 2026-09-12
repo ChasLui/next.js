@@ -1,17 +1,47 @@
-const cacheHandler =
-  require('next/dist/server/lib/cache-handlers/default').default
+// @ts-check
 
-module.exports = {
+const defaultCacheHandler =
+  require('next/dist/server/lib/cache-handlers/default.external').default
+const { AsyncLocalStorage } = require('node:async_hooks')
+const snapshot = AsyncLocalStorage.snapshot()
+
+/**
+ * @type {import('next/cache').CacheHandler}
+ */
+const cacheHandler = {
   async get(cacheKey, softTags) {
-    console.log('CustomCacheHandler::Get', cacheKey, softTags)
-    return cacheHandler.get(cacheKey, softTags)
+    console.log('ModernCustomCacheHandler::get', cacheKey, softTags)
+    return defaultCacheHandler.get(cacheKey, softTags)
   },
 
   async set(cacheKey, pendingEntry) {
-    console.log('CustomCacheHandler::Set', cacheKey)
-    return cacheHandler.set(cacheKey, pendingEntry)
+    console.log('ModernCustomCacheHandler::set', cacheKey)
+
+    pendingEntry.then(({ revalidate, expire, tags }) => {
+      snapshot(() => {
+        console.log(
+          `ModernCustomCacheHandler::set-resolved-entry revalidate: ${revalidate}, expire: ${expire}, tags: ${tags}\n  ${cacheKey}`
+        )
+      })
+    })
+
+    return defaultCacheHandler.set(cacheKey, pendingEntry)
   },
 
-  async expireTags(...tags) {},
-  async receiveExpiredTags(...tags) {},
+  async refreshTags() {
+    console.log('ModernCustomCacheHandler::refreshTags')
+    return defaultCacheHandler.refreshTags()
+  },
+
+  async getExpiration(tags) {
+    console.log('ModernCustomCacheHandler::getExpiration', JSON.stringify(tags))
+    return defaultCacheHandler.getExpiration(tags)
+  },
+
+  async updateTags(tags) {
+    console.log('ModernCustomCacheHandler::updateTags', JSON.stringify(tags))
+    return defaultCacheHandler.updateTags(tags)
+  },
 }
+
+module.exports = cacheHandler

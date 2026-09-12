@@ -102,6 +102,86 @@ describe('use-cache-dev', () => {
     )
   })
 
+  it('should update cached data used by a route handler after editing a file', async () => {
+    const initialData = await next
+      .fetch('/api/cached')
+      .then((res) => res.json())
+
+    expect(initialData.text).toBe('foo')
+    expect(initialData.uncachedText).toBe('foo')
+    expect(initialData.mathRandom).toEqual(expect.any(Number))
+
+    // A subsequent fetch returns the same cached value.
+    const cachedData = await next.fetch('/api/cached').then((res) => res.json())
+
+    expect(cachedData.text).toBe('foo')
+    expect(cachedData.mathRandom).toBe(initialData.mathRandom)
+
+    // Edit the source literals inside and outside of "use cache".
+    await next.patchFile('app/api/cached/route.ts', (content) =>
+      content.replaceAll('foo', 'bar')
+    )
+
+    // Wait until the route handler module has recompiled. The uncached value
+    // is read outside of "use cache", so it reflects the edited source. This
+    // ensures we then assert the cached value against the post-edit module,
+    // not a request that raced the recompilation.
+    await retry(async () => {
+      const recompiledData = await next
+        .fetch('/api/cached')
+        .then((res) => res.json())
+
+      expect(recompiledData.uncachedText).toBe('bar')
+    })
+
+    const newData = await next.fetch('/api/cached').then((res) => res.json())
+
+    // The cached function should return the edited value and recompute its
+    // random value due to a cache miss.
+    expect(newData.text).toBe('bar')
+    expect(newData.mathRandom).not.toBe(initialData.mathRandom)
+  })
+
+  it('should update cached data used by a page fetched without a cookie after editing a file', async () => {
+    // `next.render$` fetches directly, without the browser HMR client. The
+    // edit is still reflected because the HMR refresh hash is sourced on the
+    // server, not from a client-set cookie.
+    let $ = await next.render$('/cached-page')
+    const initialText = $('#text').text()
+    const initialMathRandom = $('#mathRandom').text()
+
+    expect(initialText).toBe('foo')
+    expect($('#uncachedText').text()).toBe('foo')
+
+    // A subsequent fetch returns the same cached value.
+    $ = await next.render$('/cached-page')
+
+    expect($('#text').text()).toBe('foo')
+    expect($('#mathRandom').text()).toBe(initialMathRandom)
+
+    // Edit the source literals inside and outside of "use cache".
+    await next.patchFile('app/cached-page/page.tsx', (content) =>
+      content.replaceAll('foo', 'bar')
+    )
+
+    // Wait until the page module has recompiled. The uncached value is read
+    // outside of "use cache", so it reflects the edited source. This ensures
+    // we then assert the cached value against the post-edit module, not a
+    // request that raced the recompilation.
+    await retry(async () => {
+      const $$ = await next.render$('/cached-page')
+
+      expect($$('#uncachedText').text()).toBe('bar')
+    })
+
+    $ = await next.render$('/cached-page')
+
+    // The cached function should return the edited value and recompute its
+    // random value due to a cache miss.
+    expect($('#text').text()).toBe('bar')
+    expect($('#mathRandom').text()).not.toBe(initialMathRandom)
+  })
+
   it('should return cached data after reload', async () => {
     let $ = await next.render$('/')
     const initialContent = $('#container').text()
@@ -143,7 +223,7 @@ describe('use-cache-dev', () => {
     )
 
     await retry(async () => {
-      expect(next.cliOutput.slice(cliOutputLength)).toInclude('✓ Compiled')
+      expect(next.cliOutput.slice(cliOutputLength)).toInclude('GET / 200')
     }, 10_000)
 
     cliOutputLength = next.cliOutput.length
@@ -154,7 +234,37 @@ describe('use-cache-dev', () => {
     )
 
     await retry(async () => {
-      expect(next.cliOutput.slice(cliOutputLength)).toInclude('✓ Compiled')
+      expect(next.cliOutput.slice(cliOutputLength)).toInclude('GET / 200')
     }, 10_000)
+  })
+
+  it('should handle edits on nested pages', async () => {
+    // Regression test: the HMR refresh hash was previously transported in a
+    // cookie that was scoped per path, so the hash set while on one route
+    // wasn't sent for a different (nested) route, and an edit there was
+    // masked by a stale hash. The hash is now sourced server-side and is
+    // path-independent, so this can't recur; the test still guards that an
+    // edit to a nested page is reflected after navigating to it.
+    const browser = await next.browser('/')
+
+    // Edit something in the root page.tsx file.
+    await next.patchFile('app/page.tsx', (content) =>
+      content.replace('foo', 'bar')
+    )
+
+    // Navigate to the nested page. This an explicit hard navigation. A soft
+    // navigation plus refresh would also reproduce the issue.
+    await browser.loadPage(new URL('/some/path', next.url).href)
+
+    expect(await browser.elementById('greeting').text()).toBe('Hi')
+
+    // Edit something in the nested page.tsx file.
+    await next.patchFile('app/some/path/page.tsx', (content) =>
+      content.replace('Hi', 'Hello')
+    )
+
+    await retry(async () => {
+      expect(await browser.elementById('greeting').text()).toBe('Hello')
+    })
   })
 })

@@ -1,27 +1,24 @@
 import { nextTestSetup } from 'e2e-utils'
 
-// TODO: remove this env once streaming metadata is available for ppr
-process.env.__NEXT_EXPERIMENTAL_PPR = 'true'
-
 describe('app-dir - metadata-streaming-config-customized', () => {
-  const { next, skipped } = nextTestSetup({
+  const { next } = nextTestSetup({
     files: __dirname,
-    skipDeployment: true,
     overrideFiles: {
       'next.config.js': `
         module.exports = {
           htmlLimitedBots: /MyBot/i,
-            experimental: {
-            ppr: 'incremental',
-          }
+          cacheComponents: true,
         }
       `,
     },
   })
 
-  if (skipped) return
-
   it('should have the customized streaming metadata config output in routes-manifest.json', async () => {
+    const requiredServerFiles = JSON.parse(
+      await next.readFile('.next/required-server-files.json')
+    )
+    expect(requiredServerFiles.config.htmlLimitedBots).toBe('MyBot')
+
     const prerenderManifest = JSON.parse(
       await next.readFile('.next/prerender-manifest.json')
     )
@@ -37,10 +34,25 @@ describe('app-dir - metadata-streaming-config-customized', () => {
 
     expect(bypassConfigs).toMatchInlineSnapshot(`
      {
+       "/": {
+         "key": "user-agent",
+         "type": "header",
+         "value": ".*(?:MyBot).*",
+       },
+       "/_global-error": {
+         "key": "user-agent",
+         "type": "header",
+         "value": ".*(?:MyBot).*",
+       },
+       "/_not-found": {
+         "key": "user-agent",
+         "type": "header",
+         "value": ".*(?:MyBot).*",
+       },
        "/ppr": {
          "key": "user-agent",
          "type": "header",
-         "value": "MyBot",
+         "value": ".*(?:MyBot).*",
        },
      }
     `)

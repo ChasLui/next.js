@@ -1,15 +1,24 @@
+import type { AppPageModule } from './route-modules/app-page/module'
+
 // Combined load times for loading client components
 let clientComponentLoadStart = 0
+let clientComponentLoadEnd = 0
 let clientComponentLoadTimes = 0
 let clientComponentLoadCount = 0
 
-export function wrapClientComponentLoader(ComponentMod: any) {
-  if (!('performance' in globalThis)) {
+export function wrapClientComponentLoader(
+  ComponentMod: AppPageModule,
+  isTracingEnabled: boolean
+): AppPageModule['__next_app__'] {
+  if (
+    !('performance' in globalThis) ||
+    (!process.env.NEXT_OTEL_PERFORMANCE_PREFIX && !isTracingEnabled)
+  ) {
     return ComponentMod.__next_app__
   }
 
   return {
-    require: (...args: any[]) => {
+    require: (...args) => {
       const startTime = performance.now()
 
       if (clientComponentLoadStart === 0) {
@@ -20,16 +29,28 @@ export function wrapClientComponentLoader(ComponentMod: any) {
         clientComponentLoadCount += 1
         return ComponentMod.__next_app__.require(...args)
       } finally {
-        clientComponentLoadTimes += performance.now() - startTime
+        const endTime = performance.now()
+        clientComponentLoadEnd = endTime
+        clientComponentLoadTimes += endTime - startTime
       }
     },
-    loadChunk: (...args: any[]) => {
+    loadChunk: (...args) => {
       const startTime = performance.now()
-      try {
-        return ComponentMod.__next_app__.loadChunk(...args)
-      } finally {
-        clientComponentLoadTimes += performance.now() - startTime
+
+      if (clientComponentLoadStart === 0) {
+        clientComponentLoadStart = startTime
       }
+
+      const result = ComponentMod.__next_app__.loadChunk(...args)
+      // Avoid wrapping `loadChunk`'s result in an extra promise in case something like React depends on its identity.
+      // We only need to know when it's settled.
+      const onSettled = () => {
+        const endTime = performance.now()
+        clientComponentLoadEnd = endTime
+        clientComponentLoadTimes += endTime - startTime
+      }
+      result.then(onSettled, onSettled)
+      return result
     },
   }
 }
@@ -42,12 +63,14 @@ export function getClientComponentLoaderMetrics(
       ? undefined
       : {
           clientComponentLoadStart,
+          clientComponentLoadEnd,
           clientComponentLoadTimes,
           clientComponentLoadCount,
         }
 
   if (options.reset) {
     clientComponentLoadStart = 0
+    clientComponentLoadEnd = 0
     clientComponentLoadTimes = 0
     clientComponentLoadCount = 0
   }

@@ -18,7 +18,8 @@ import picomatch from 'next/dist/compiled/picomatch'
 import { getModuleBuildInfo } from '../loaders/get-module-build-info'
 import { getPageFilePath } from '../../entries'
 import { resolveExternal } from '../../handle-externals'
-import { isStaticMetadataRoute } from '../../../lib/metadata/is-metadata-route'
+import { isMetadataRouteFile } from '../../../lib/metadata/is-metadata-route'
+import { isMiddlewareFilename } from '../../utils'
 import { getCompilationSpan } from '../utils'
 
 const PLUGIN_NAME = 'TraceEntryPointsPlugin'
@@ -186,9 +187,9 @@ export class TraceEntryPointsPlugin implements webpack.WebpackPluginInstance {
       for (const entrypoint of compilation.entrypoints.values()) {
         const entryFiles = new Set<string>()
 
-        for (const chunk of process.env.NEXT_RSPACK
-          ? entrypoint.chunks
-          : entrypoint.getEntrypointChunk().getAllReferencedChunks()) {
+        for (const chunk of entrypoint
+          .getEntrypointChunk()
+          .getAllReferencedChunks()) {
           for (const file of chunk.files) {
             if (isTraceable(file)) {
               const filePath = nodePath.join(outputPath, file)
@@ -243,7 +244,7 @@ export class TraceEntryPointsPlugin implements webpack.WebpackPluginInstance {
 
           const entryIsStaticMetadataRoute =
             appDirRelativeEntryPath &&
-            isStaticMetadataRoute(appDirRelativeEntryPath)
+            isMetadataRouteFile(appDirRelativeEntryPath, [], true)
 
           // Include the client reference manifest in the trace, but not for
           // static metadata routes, for which we don't generate those.
@@ -335,8 +336,14 @@ export class TraceEntryPointsPlugin implements webpack.WebpackPluginInstance {
                   const isPage = normalizedName.startsWith('pages/')
                   const isApp =
                     this.appDirEnabled && normalizedName.startsWith('app/')
+                  // Middleware/proxy lives at the project root rather than
+                  // under pages/ or app/, so it gets its own gate. Without
+                  // this, source-level NFT analysis is skipped for the
+                  // middleware/proxy entry and runtime fs/path/process.cwd()
+                  // patterns never make it into `middleware.js.nft.json`.
+                  const isMiddleware = isMiddlewareFilename(normalizedName)
 
-                  if (isApp || isPage) {
+                  if (isApp || isPage || isMiddleware) {
                     for (const dep of entry.dependencies) {
                       if (!dep) continue
                       const entryMod = getModuleFromDependency(compilation, dep)
@@ -347,16 +354,24 @@ export class TraceEntryPointsPlugin implements webpack.WebpackPluginInstance {
                         const moduleBuildInfo = getModuleBuildInfo(entryMod)
                         // All loaders that are used to create entries have a `route` property on the buildInfo.
                         if (moduleBuildInfo.route) {
-                          const absolutePath = getPageFilePath({
-                            absolutePagePath:
-                              moduleBuildInfo.route.absolutePagePath,
-                            rootDir: this.rootDir,
-                            appDir: this.appDir,
-                            pagesDir: this.pagesDir,
-                          })
+                          // Middleware/proxy sources live at the project root,
+                          // not under pagesDir/appDir, so `getPageFilePath`
+                          // does not apply — use the absolutePagePath directly.
+                          const absolutePath = isMiddleware
+                            ? moduleBuildInfo.route.absolutePagePath
+                            : getPageFilePath({
+                                absolutePagePath:
+                                  moduleBuildInfo.route.absolutePagePath,
+                                rootDir: this.rootDir,
+                                appDir: this.appDir,
+                                pagesDir: this.pagesDir,
+                              })
 
-                          // Ensures we don't handle non-pages.
+                          // Skip entries whose source is neither a pages/app
+                          // file (under pagesDir/appDir) nor a middleware/proxy
+                          // file at the project root.
                           if (
+                            isMiddleware ||
                             (this.pagesDir &&
                               absolutePath.startsWith(this.pagesDir)) ||
                             (this.appDir &&
@@ -491,6 +506,7 @@ export class TraceEntryPointsPlugin implements webpack.WebpackPluginInstance {
                     : undefined,
                   ignore: ignoreFn,
                   mixedModules: true,
+                  moduleSyncCatchall: true,
                 })
                 // @ts-ignore
                 fileList = result.fileList
@@ -581,23 +597,6 @@ export class TraceEntryPointsPlugin implements webpack.WebpackPluginInstance {
       const traceEntrypointsPluginSpan = compilationSpan.traceChild(
         'next-trace-entrypoint-plugin'
       )
-
-      compilation.hooks.processAssets.tapAsync(
-        {
-          name: PLUGIN_NAME,
-          stage: webpack.Compilation.PROCESS_ASSETS_STAGE_SUMMARIZE,
-        },
-        (_assets: any, callback: any) => {
-          this.createTraceAssets(compilation, traceEntrypointsPluginSpan)
-            .then(() => callback())
-            .catch((err) => callback(err))
-        }
-      )
-
-      // rspack doesn't support all API below so only create trace assets
-      if (process.env.NEXT_RSPACK) {
-        return
-      }
 
       const readlink = async (path: string): Promise<string | null> => {
         try {

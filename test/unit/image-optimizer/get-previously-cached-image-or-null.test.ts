@@ -1,11 +1,9 @@
 /* eslint-env jest */
-import {
-  getPreviouslyCachedImageOrNull,
-  getImageEtag,
-} from 'next/dist/server/image-optimizer'
+import { getPreviouslyCachedImageOrNull } from 'next/dist/server/image-optimizer/get-previously-cached-image-or-null'
+import { getImageEtag } from 'next/dist/server/image-optimizer/extract-etag'
 import {
   CachedRouteKind,
-  IncrementalCacheItem,
+  IncrementalCacheEntry,
 } from 'next/dist/server/response-cache/types'
 import { readFile } from 'fs-extra'
 import { join } from 'path'
@@ -37,7 +35,7 @@ const getPreviousCacheEntry = async (
 ) => {
   const buffer = await readFile(join(__dirname, filepath))
   const upstreamEtag = getImageEtag(buffer)
-  const result: IncrementalCacheItem = {
+  const result: IncrementalCacheEntry = {
     ...baseCacheEntry,
     value: {
       kind: CachedRouteKind.IMAGE,
@@ -62,7 +60,7 @@ describe('shouldUsePreviouslyCachedEntry', () => {
   })
 
   it('should return null if previous cache entry value is not of kind IMAGE', async () => {
-    const nonImageCacheEntry: IncrementalCacheItem = {
+    const nonImageCacheEntry: IncrementalCacheEntry = {
       ...baseCacheEntry,
       value: { kind: CachedRouteKind.REDIRECT, props: {} },
     }

@@ -89,14 +89,14 @@ describe('app dir - metadata navigation', () => {
 
     it('should show the index title', async () => {
       const browser = await next.browser('/parallel-route')
-      expect(await browser.elementByCss('title').text()).toBe('Home Layout')
+      expect(await getTitle(browser)).toBe('Home Layout')
     })
 
     it('should show target page metadata after navigation', async () => {
       const browser = await next.browser('/parallel-route')
       await browser.elementByCss('#product-link').click()
       await browser.waitForElementByCss('#product-title')
-      expect(await browser.elementByCss('title').text()).toBe('Product Layout')
+      expect(await getTitle(browser)).toBe('Product Layout')
     })
 
     it('should show target page metadata after navigation with back', async () => {
@@ -105,7 +105,36 @@ describe('app dir - metadata navigation', () => {
       await browser.waitForElementByCss('#product-title')
       await browser.elementByCss('#home-link').click()
       await browser.waitForElementByCss('#home-title')
-      expect(await browser.elementByCss('title').text()).toBe('Home Layout')
+      expect(await getTitle(browser)).toBe('Home Layout')
+    })
+  })
+
+  describe('server action', () => {
+    it('should not render fallback noindex metadata if request is initiated from server action', async () => {
+      const browser = await next.browser('/server-action/not-found')
+      // collect server action requests
+      let isActionSent = false
+      browser.on('request', (req) => {
+        if (
+          req.method() === 'POST' &&
+          req.url().endsWith('/server-action/not-found')
+        ) {
+          isActionSent = true
+        }
+      })
+
+      // trigger not-found action and wait until the server action is performed
+      await browser.elementByCss('#trigger-not-found').click()
+      await retry(async () => {
+        expect(isActionSent).toBe(true)
+      })
+
+      expect(await browser.elementsByCss('meta[name="robots"]')).toHaveLength(1)
+      expect(
+        await browser
+          .elementByCss('meta[name="robots"]')
+          .getAttribute('content')
+      ).toBe('noindex, nofollow')
     })
   })
 })

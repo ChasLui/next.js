@@ -1,8 +1,10 @@
 import type { MatcherContext } from 'expect'
 import { toMatchInlineSnapshot } from 'jest-snapshot'
 import {
-  assertHasRedbox,
+  waitForRedbox,
   getRedboxCallStack,
+  getRedboxCause,
+  getRedboxAggregateErrors,
   getRedboxComponentStack,
   getRedboxDescription,
   getRedboxEnvironmentLabel,
@@ -11,7 +13,7 @@ import {
   getRedboxTotalErrorCount,
   openRedbox,
 } from './next-test-utils'
-import type { BrowserInterface } from './browsers/base'
+import type { Playwright } from './browsers/playwright'
 import { NextInstance } from 'e2e-utils'
 
 declare global {
@@ -31,12 +33,16 @@ declare global {
        * `<FIXME-internal-frame>` in the snapshot would be unintended.
        * `<FIXME-project-root>` in the snapshot would be unintended.
        * `<FIXME-file-protocol>` in the snapshot would be unintended.
+       * `<FIXME-next-dist-dir>` in the snapshot would be unintended.
        * Any node_modules in the snapshot would be unintended.
        * Differences in the snapshot between Turbopack and Webpack would be unintended.
        *
        * @param inlineSnapshot - The snapshot to compare against.
        */
-      toDisplayRedbox(inlineSnapshot?: string): Promise<void>
+      toDisplayRedbox(
+        inlineSnapshot?: string,
+        opts?: ErrorSnapshotOptions
+      ): Promise<void>
 
       /**
        * Inline snapshot matcher for a Redbox that's collapsed by default.
@@ -50,30 +56,135 @@ declare global {
        * `<FIXME-internal-frame>` in the snapshot would be unintended.
        * `<FIXME-project-root>` in the snapshot would be unintended.
        * `<FIXME-file-protocol>` in the snapshot would be unintended.
+       * `<FIXME-next-dist-dir>` in the snapshot would be unintended.
        * Any node_modules in the snapshot would be unintended.
        * Differences in the snapshot between Turbopack and Webpack would be unintended.
        *
        * @param inlineSnapshot - The snapshot to compare against.
        */
-      toDisplayCollapsedRedbox(inlineSnapshot?: string): Promise<void>
+      toDisplayCollapsedRedbox(
+        inlineSnapshot?: string,
+        opts?: ErrorSnapshotOptions
+      ): Promise<void>
     }
   }
 }
 
-interface RedboxSnapshot {
-  environmentLabel: string
-  label: string
-  description: string
-  componentStack?: string
-  source: string
-  stack: string[]
-  count: number
+interface ErrorSnapshotOptions {
+  label?: boolean
 }
 
-async function createRedboxSnapshot(
-  browser: BrowserInterface,
+interface SanitizedCauseEntry {
+  label: string | null
+  message?: string
+  source: string | null
+  stack: string[]
+}
+
+export interface ErrorSnapshot {
+  environmentLabel: string | null
+  label: string | null
+  description?: string
+  componentStack?: string
+  cause?: SanitizedCauseEntry[]
+  aggregateErrors?: SanitizedCauseEntry[]
+  source: string | null
+  stack: string[] | null
+}
+
+/**
+ * Focus source to just the header, errored line, and cursor.
+ * Strips surrounding context lines.
+ */
+function focusSource(
+  source: string | null,
   next: NextInstance | null
-): Promise<RedboxSnapshot> {
+): string | null {
+  if (source === null) return null
+
+  let focusedSource = ''
+  const sourceFrameLines = source.split('\n')
+  for (let i = 0; i < sourceFrameLines.length; i++) {
+    const sourceFrameLine = sourceFrameLines[i].trimEnd()
+    if (sourceFrameLine === '') {
+      continue
+    }
+
+    if (sourceFrameLine.startsWith('>')) {
+      // This is where the cursor will point
+      // Include the cursor and nothing below since it's just surrounding code.
+      focusedSource += '\n' + sourceFrameLine
+      focusedSource += '\n' + sourceFrameLines[i + 1]
+      break
+    }
+    const isCodeFrameLine = /^ {2}\s*\d+ \|/.test(sourceFrameLine)
+    if (!isCodeFrameLine) {
+      focusedSource += '\n' + sourceFrameLine
+    }
+  }
+
+  focusedSource = focusedSource.trim()
+
+  if (next !== null) {
+    focusedSource = focusedSource.replaceAll(
+      next.testDir,
+      '<FIXME-project-root>'
+    )
+  }
+
+  // This is the processed path the nextjs file from node_modules,
+  // likely not being processed properly and it's not deterministic among tests.
+  // e.g. it could be a encoded url of loader path:
+  // ../packages/next/dist/build/webpack/loaders/next-app-loader/index.js...
+  const sourceLines = focusedSource.split('\n')
+  if (
+    sourceLines[0].startsWith('./node_modules/.pnpm/next@file+') ||
+    sourceLines[0].startsWith('./node_modules/.pnpm/file+') ||
+    // e.g. "next-app-loader?<SEARCH PARAMS>" (in rspack, the loader doesn't seem to be prefixed with node_modules)
+    /^next-[a-zA-Z0-9\-_]+?-loader\?/.test(sourceLines[0])
+  ) {
+    focusedSource = `<FIXME-nextjs-internal-source>\n${sourceLines.slice(1).join('\n')}`
+  }
+
+  return focusedSource
+}
+
+/**
+ * Sanitize stack frames: collapse internal frames, replace project root.
+ */
+function sanitizeStack(
+  stack: string[] | null,
+  next: NextInstance | null
+): string[] | null {
+  if (stack === null) return null
+
+  const sanitized: string[] = []
+  let foundInternalFrame = false
+  for (const frame of stack) {
+    const isInternalFrame = / .\/dist\//.test(frame)
+    if (isInternalFrame) {
+      if (!foundInternalFrame) {
+        sanitized.push('<FIXME-internal-frame>')
+      }
+      foundInternalFrame = true
+    } else if (frame.includes('file://')) {
+      sanitized.push('<FIXME-file-protocol>')
+    } else if (frame.includes('.next/')) {
+      sanitized.push('<FIXME-next-dist-dir>')
+    } else if (next !== null) {
+      sanitized.push(frame.replace(next.testDir, '<FIXME-project-root>'))
+    } else {
+      sanitized.push(frame)
+    }
+  }
+  return sanitized
+}
+
+async function createErrorSnapshot(
+  browser: Playwright,
+  next: NextInstance | null,
+  { label: includeLabel = true }: ErrorSnapshotOptions = {}
+): Promise<ErrorSnapshot> {
   const [
     label,
     environmentLabel,
@@ -81,15 +192,17 @@ async function createRedboxSnapshot(
     source,
     stack,
     componentStack,
-    count,
+    cause,
+    aggregateErrors,
   ] = await Promise.all([
-    getRedboxLabel(browser),
+    includeLabel ? getRedboxLabel(browser) : null,
     getRedboxEnvironmentLabel(browser),
     getRedboxDescription(browser),
     getRedboxSource(browser),
     getRedboxCallStack(browser),
     getRedboxComponentStack(browser),
-    getRedboxTotalErrorCount(browser),
+    getRedboxCause(browser),
+    getRedboxAggregateErrors(browser),
   ])
 
   // We don't need to test the codeframe logic everywhere.
@@ -110,55 +223,32 @@ async function createRedboxSnapshot(
   // pages/index.js (3:11) @ Page
   // > 3 |     throw new Error("anonymous error!");
   //     |           ^
-  let focusedSource = source
-  if (source !== null) {
-    focusedSource = ''
-    const sourceFrameLines = source.split('\n')
-    for (let i = 0; i < sourceFrameLines.length; i++) {
-      const sourceFrameLine = sourceFrameLines[i].trimEnd()
-      if (sourceFrameLine === '') {
-        continue
-      }
+  const focusedSource = focusSource(source, next)
 
-      if (sourceFrameLine.startsWith('>')) {
-        // This is where the cursor will point
-        // Include the cursor and nothing below since it's just surrounding code.
-        focusedSource += '\n' + sourceFrameLine
-        focusedSource += '\n' + sourceFrameLines[i + 1]
-        break
-      }
-      const isCodeFrameLine = /^ {2}\s*\d+ \|/.test(sourceFrameLine)
-      if (!isCodeFrameLine) {
-        focusedSource += '\n' + sourceFrameLine
-      }
-    }
+  let sanitizedDescription = description
 
-    focusedSource = focusedSource.trim()
+  if (sanitizedDescription) {
+    sanitizedDescription = sanitizedDescription
+      .replace(/{imported module [^}]+}/, '<turbopack-module-id>')
+      .replace(/\w+_WEBPACK_IMPORTED_MODULE_\w+/, '<webpack-module-id>')
 
     if (next !== null) {
-      focusedSource = focusedSource.replace(
+      sanitizedDescription = sanitizedDescription.replace(
         next.testDir,
         '<FIXME-project-root>'
       )
     }
   }
 
-  const snapshot: RedboxSnapshot = {
+  const snapshot: ErrorSnapshot = {
     environmentLabel,
-    label,
-    description:
-      description !== null && next !== null
-        ? description.replace(next.testDir, '<FIXME-project-root>')
-        : description,
+    label: label ?? '<FIXME-excluded-label>',
     source: focusedSource,
-    stack:
-      next !== null
-        ? stack.map((stackframe) => {
-            return stackframe.replace(next.testDir, '<FIXME-project-root>')
-          })
-        : stack,
-    // TODO(newDevOverlay): Always return `count`. Normalizing currently to avoid assertion forks.
-    count: label === 'Build Error' && count === -1 ? 1 : count,
+    stack: sanitizeStack(stack, next),
+  }
+
+  if (sanitizedDescription !== null) {
+    snapshot.description = sanitizedDescription
   }
 
   // Hydration diffs are only relevant to some specific errors
@@ -167,19 +257,81 @@ async function createRedboxSnapshot(
     snapshot.componentStack = componentStack
   }
 
+  // Error.cause chain is only relevant when present.
+  if (cause !== null) {
+    snapshot.cause = cause.map((entry) => {
+      const causeEntry: SanitizedCauseEntry = {
+        label: entry.label,
+        source: focusSource(entry.source, next),
+        stack: sanitizeStack(entry.stack, next) ?? [],
+      }
+      if (entry.message !== null) {
+        causeEntry.message = entry.message
+      }
+      return causeEntry
+    })
+  }
+
+  // AggregateError.errors are only relevant when present.
+  if (aggregateErrors !== null) {
+    snapshot.aggregateErrors = aggregateErrors.map((entry) => {
+      const aggEntry: SanitizedCauseEntry = {
+        label: entry.label,
+        source: focusSource(entry.source, next),
+        stack: sanitizeStack(entry.stack, next) ?? [],
+      }
+      if (entry.message !== null) {
+        aggEntry.message = entry.message
+      }
+      return aggEntry
+    })
+  }
+
   return snapshot
+}
+
+export type RedboxSnapshot = ErrorSnapshot | ErrorSnapshot[]
+
+export async function createRedboxSnapshot(
+  browser: Playwright,
+  next: NextInstance | null,
+  opts?: ErrorSnapshotOptions
+): Promise<RedboxSnapshot> {
+  const errorTally = await getRedboxTotalErrorCount(browser)
+  const errorSnapshots: ErrorSnapshot[] = []
+
+  for (let errorIndex = 0; errorIndex < errorTally; errorIndex++) {
+    const errorSnapshot = await createErrorSnapshot(browser, next, opts)
+    errorSnapshots.push(errorSnapshot)
+
+    if (errorIndex < errorTally - 1) {
+      // Go to next error
+      await browser
+        .waitForElementByCss('[data-nextjs-dialog-error-next]')
+        .click()
+      // TODO: Wait for suspended content if the click triggered it.
+      await browser.waitForElementByCss(
+        `[data-nextjs-dialog-error-index="${errorIndex + 1}"]`
+      )
+    }
+  }
+
+  return errorSnapshots.length === 1
+    ? // Most of the Redbox tests will just show a single error.
+      // We optimize display for that case.
+      errorSnapshots[0]
+    : errorSnapshots
 }
 
 expect.extend({
   async toDisplayRedbox(
     this: MatcherContext,
-    browserOrContext:
-      | BrowserInterface
-      | { browser: BrowserInterface; next: NextInstance },
-    expectedRedboxSnapshot?: string
+    browserOrContext: Playwright | { browser: Playwright; next: NextInstance },
+    expectedRedboxSnapshot?: string,
+    opts?: ErrorSnapshotOptions
   ) {
-    let browser: BrowserInterface
-    let next: NextInstance
+    let browser: Playwright
+    let next: NextInstance | null
     if ('browser' in browserOrContext && 'next' in browserOrContext) {
       browser = browserOrContext.browser
       next = browserOrContext.next
@@ -197,7 +349,7 @@ expect.extend({
     this.dontThrow = () => {}
 
     try {
-      await assertHasRedbox(browser)
+      await waitForRedbox(browser)
     } catch (cause) {
       // argument length is relevant.
       // Jest will update absent snapshots but fail if you specify a snapshot even if undefined.
@@ -212,7 +364,7 @@ expect.extend({
       }
     }
 
-    const redbox = await createRedboxSnapshot(browser, next)
+    const redbox = await createRedboxSnapshot(browser, next, opts)
 
     // argument length is relevant.
     // Jest will update absent snapshots but fail if you specify a snapshot even if undefined.
@@ -224,12 +376,11 @@ expect.extend({
   },
   async toDisplayCollapsedRedbox(
     this: MatcherContext,
-    browserOrContext:
-      | BrowserInterface
-      | { browser: BrowserInterface; next: NextInstance },
-    expectedRedboxSnapshot?: string
+    browserOrContext: Playwright | { browser: Playwright; next: NextInstance },
+    expectedRedboxSnapshot?: string,
+    opts?: ErrorSnapshotOptions
   ) {
-    let browser: BrowserInterface
+    let browser: Playwright
     let next: NextInstance | null
     if ('browser' in browserOrContext && 'next' in browserOrContext) {
       browser = browserOrContext.browser
@@ -256,21 +407,21 @@ expect.extend({
         return toMatchInlineSnapshot.call(
           this,
           String(cause.message)
-            // Should switch to `toDisplayRedbox` not `assertHasRedbox`
-            .replace('assertHasRedbox', 'toDisplayRedbox')
+            // Should switch to `toDisplayRedbox` not `waitForRedbox`
+            .replace('waitForRedbox', 'toDisplayRedbox')
         )
       } else {
         return toMatchInlineSnapshot.call(
           this,
           String(cause.message)
-            // Should switch to `toDisplayRedbox` not `assertHasRedbox`
-            .replace('assertHasRedbox', 'toDisplayRedbox'),
+            // Should switch to `toDisplayRedbox` not `waitForRedbox`
+            .replace('waitForRedbox', 'toDisplayRedbox'),
           expectedRedboxSnapshot
         )
       }
     }
 
-    const redbox = await createRedboxSnapshot(browser, next)
+    const redbox = await createRedboxSnapshot(browser, next, opts)
 
     // argument length is relevant.
     // Jest will update absent snapshots but fail if you specify a snapshot even if undefined.

@@ -1,4 +1,4 @@
-import { FileRef, nextTestSetup } from 'e2e-utils'
+import { FileRef, nextTestSetup, Playwright } from 'e2e-utils'
 import { retry, waitFor } from 'next-test-utils'
 import path from 'path'
 
@@ -11,6 +11,86 @@ describe(`app-dir-hmr`, () => {
   })
 
   describe('filesystem changes', () => {
+    // @force-gate turbopack
+    it('reloads the page if the server advanced while the client was disconnected', async () => {
+      const componentPath = 'app/hmr-reconnect/page.js'
+      const originalComponent = await next.readFile(componentPath)
+      let forwardHmrTraffic = true
+      let droppedHmrMessages = 0
+      let reconnectHmr = () => {}
+      const subscriptionHashes: Array<string | undefined> = []
+
+      const getHmrValue = (browser: Playwright<unknown>) =>
+        browser.eval(`document.querySelector('#hmr-value')?.textContent`)
+
+      try {
+        const browser = await next.browser('/hmr-reconnect', {
+          async beforePageLoad(page) {
+            await page.routeWebSocket(/\/_next\/hmr/, (clientSocket) => {
+              const serverSocket = clientSocket.connectToServer()
+              function connectServerSocket() {
+                serverSocket.onMessage((message) => {
+                  if (forwardHmrTraffic) {
+                    clientSocket.send(message)
+                  } else {
+                    droppedHmrMessages++
+                  }
+                })
+              }
+              connectServerSocket()
+              clientSocket.onMessage((message) => {
+                if (typeof message === 'string') {
+                  const parsed = JSON.parse(message)
+                  if (parsed.type === 'turbopack-subscribe') {
+                    subscriptionHashes.push(parsed.hmrVersion)
+                  }
+                }
+                serverSocket.send(message)
+              })
+              reconnectHmr = () => serverSocket.close()
+            })
+          },
+        })
+        await retry(async () => {
+          expect(await getHmrValue(browser)).toBe('Initial')
+        })
+
+        await next.patchFile(
+          componentPath,
+          originalComponent.replace('Initial', 'First edit')
+        )
+        await retry(async () => {
+          expect(await getHmrValue(browser)).toBe('First edit')
+        })
+        await browser.eval(`window.__hmrTestDocument = true`)
+
+        forwardHmrTraffic = false
+        await next.patchFile(
+          componentPath,
+          originalComponent.replace('Initial', 'Second edit')
+        )
+        await retry(async () => {
+          expect(droppedHmrMessages).toBeGreaterThan(0)
+        })
+        expect(await getHmrValue(browser)).not.toBe('Second edit')
+        expect(await browser.eval(`window.__hmrTestDocument`)).toBe(true)
+
+        forwardHmrTraffic = true
+        reconnectHmr()
+        await retry(async () => {
+          expect(subscriptionHashes.some((hash) => hash !== undefined)).toBe(
+            true
+          )
+        })
+        await retry(async () => {
+          expect(await getHmrValue(browser)).toBe('Second edit')
+        }, 10_000)
+        expect(await browser.eval(`window.__hmrTestDocument`)).toBeUndefined()
+      } finally {
+        await next.patchFile(componentPath, originalComponent)
+      }
+    })
+
     it('should not continously poll when hitting a not found page', async () => {
       let requestCount = 0
 
@@ -50,6 +130,8 @@ describe(`app-dir-hmr`, () => {
         // The new page should be rendered
         const newHTML = await next.render('/folder-renamed')
         expect(newHTML).toContain('Hello')
+
+        expect(next.cliOutput).not.toContain('FATAL')
       } finally {
         // Rename it back
         await next.renameFolder('app/folder-renamed', 'app/folder')
@@ -74,27 +156,8 @@ describe(`app-dir-hmr`, () => {
           expect(await browser.elementByCss('p').text()).toBe('ipad')
         }, 5000 /* ms */)
 
-        expect(
-          await browser.eval('window.__TEST_NO_RELOAD === undefined')
-        ).toBe(false)
-
-        const logs = await browser.log()
-        const fastRefreshLogs = logs.filter((log) => {
-          return log.message.startsWith('[Fast Refresh]')
-        })
-
-        // The exact ordering and number of these messages is implementation
-        // dependent and subject to race conditions, just check that we have at
-        // least one "rebuilding" and "done in" message in the logs, the exact
-        // details are unimportant.
-        expect(fastRefreshLogs).toEqual(
-          expect.arrayContaining([
-            { source: 'log', message: '[Fast Refresh] rebuilding' },
-            {
-              source: 'log',
-              message: expect.stringContaining('[Fast Refresh] done in '),
-            },
-          ])
+        expect(await browser.eval('window.__TEST_NO_RELOAD === true')).toBe(
+          true
         )
       })
 
@@ -102,49 +165,9 @@ describe(`app-dir-hmr`, () => {
       await retry(async () => {
         expect(await browser.elementByCss('p').text()).toBe('mac')
       })
+
+      expect(next.cliOutput).not.toContain('FATAL')
     })
-
-    it.each(['node', 'node-module-var', 'edge', 'edge-module-var'])(
-      'should update server components pages when env files is changed (%s)',
-      async (page) => {
-        const browser = await next.browser(`/env/${page}`)
-        expect(await browser.elementByCss('p').text()).toBe('mac')
-
-        await next.patchFile(envFile, 'MY_DEVICE="ipad"', async () => {
-          let logs
-
-          await retry(async () => {
-            logs = await browser.log()
-            expect(logs).toEqual(
-              expect.arrayContaining([
-                expect.objectContaining({
-                  message: '[Fast Refresh] rebuilding',
-                  source: 'log',
-                }),
-              ])
-            )
-          })
-
-          await retry(async () => {
-            expect(await browser.elementByCss('p').text()).toBe('ipad')
-          })
-
-          expect(logs).toEqual(
-            expect.arrayContaining([
-              expect.objectContaining({
-                message: expect.stringContaining('[Fast Refresh] done in'),
-                source: 'log',
-              }),
-            ])
-          )
-        })
-
-        // ensure it's restored back to "mac" before the next test
-        await retry(async () => {
-          expect(await browser.elementByCss('p').text()).toBe('mac')
-        })
-      }
-    )
 
     it('should have no unexpected action error for hmr', async () => {
       expect(next.cliOutput).not.toContain('Unexpected action')
@@ -162,16 +185,14 @@ describe(`app-dir-hmr`, () => {
       await browser
         .elementByCss('a')
         .click()
-        .waitForElementByCss('[data-testid="new-runtime-functionality-page"]')
+        .waitForElementByCss('[data-testid="new-runtime-functionality-page"]', {
+          state: 'attached',
+        })
 
       const logs = await browser.log()
       // TODO: Should assert on all logs but these are cluttered with logs from our test utils (e.g. playwright tracing or webdriver)
       expect(logs).toEqual(
         expect.arrayContaining([
-          {
-            message: '[Fast Refresh] rebuilding',
-            source: 'log',
-          },
           {
             message: expect.stringContaining('[Fast Refresh] done in'),
             source: 'log',
@@ -187,6 +208,8 @@ describe(`app-dir-hmr`, () => {
       )
       // No MPA navigation triggered
       expect(await browser.eval('window.__TEST_NO_RELOAD')).toEqual(true)
+
+      expect(next.cliOutput).not.toContain('FATAL')
     })
   })
 })

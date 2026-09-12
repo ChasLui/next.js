@@ -1,52 +1,73 @@
 import { nextTestSetup } from 'e2e-utils'
-import {
-  assertHasRedbox,
-  assertNoRedbox,
-  getRedboxDescription,
-  getRedboxSource,
-} from 'next-test-utils'
+import { waitForRedbox } from 'next-test-utils'
 import stripAnsi from 'strip-ansi'
 
+// TODO(deploy-test-completion): Re-enable this suite in deploy mode.
+// It likely expects a local build failure instead of a successful deployment.
+// @force-gate !deploy
 describe('use-cache-segment-configs', () => {
-  const { next, skipped, isNextDev, isTurbopack } = nextTestSetup({
+  const { next, isNextDev, isTurbopack, isRspack } = nextTestSetup({
     files: __dirname,
     skipStart: process.env.NEXT_TEST_MODE !== 'dev',
-    skipDeployment: true,
   })
-
-  if (skipped) {
-    return
-  }
 
   it("it should error when using segment configs that aren't supported by useCache", async () => {
     if (isNextDev) {
       const browser = await next.browser('/runtime')
 
+      await waitForRedbox(browser)
+
       if (isTurbopack) {
-        await assertHasRedbox(browser)
-
-        const description = await getRedboxDescription(browser)
-        expect(description).toMatchInlineSnapshot(
-          `"Ecmascript file had an error"`
-        )
-        const source = await getRedboxSource(browser)
-
-        expect(source).toMatchInlineSnapshot(`
-         "./app/runtime/page.tsx (1:14)
-         Ecmascript file had an error
+        await expect(browser).toDisplayRedbox(`
+         {
+           "description": "Route segment config "runtime" is not compatible with \`nextConfig.experimental.useCache\`. Please remove it.",
+           "environmentLabel": null,
+           "label": "Build Error",
+           "source": "./app/runtime/page.tsx (1:14)
+         Error: Route segment config "runtime" is not compatible with \`nextConfig.experimental.useCache\`. Please remove it.
          > 1 | export const runtime = 'edge'
-             |              ^^^^^^^
-           2 |
-           3 | export default function Page() {
-           4 |   return <div>This page uses \`export const runtime\`.</div>
-
-         Route segment config "runtime" is not compatible with \`nextConfig.experimental.useCache\`. Please remove it."
+             |              ^^^^^^^",
+           "stack": [],
+         }
+        `)
+      } else if (isRspack) {
+        await expect(browser).toDisplayRedbox(`
+         {
+           "description": "  ╰─▶   × Error:   x Route segment config "runtime" is not compatible with \`nextConfig.experimental.useCache\`. Please remove it.",
+           "environmentLabel": null,
+           "label": "Build Error",
+           "source": "<FIXME-nextjs-internal-source>
+           ╰─▶   × Error:   x Route segment config "runtime" is not compatible with \`nextConfig.experimental.useCache\`. Please remove it.
+                 │    ,-[1:1]
+                 │  1 | export const runtime = 'edge'
+                 │    :              ^^^^^^^
+                 │  2 |
+                 │  3 | export default function Page() {
+                 │  4 |   return <div>This page uses \`export const runtime\`.</div>
+                 │    \`----
+                 │",
+           "stack": [],
+         }
         `)
       } else {
-        // TODO(veil): Figure out why dev overlay is not shown with Webpack when
-        // the runtime is 'edge'. It's possibly related to the import trace
-        // being wrong (pointing at the Webpack loader resource).
-        await assertNoRedbox(browser)
+        // FIXME: Fix broken import trace for Webpack loader resource.
+        await expect(browser).toDisplayRedbox(`
+         {
+           "description": "  x Route segment config "runtime" is not compatible with \`nextConfig.experimental.useCache\`. Please remove it.",
+           "environmentLabel": null,
+           "label": "Build Error",
+           "source": "<FIXME-nextjs-internal-source>
+         Error:   x Route segment config "runtime" is not compatible with \`nextConfig.experimental.useCache\`. Please remove it.
+            ,-[1:1]
+          1 | export const runtime = 'edge'
+            :              ^^^^^^^
+          2 |
+          3 | export default function Page() {
+          4 |   return <div>This page uses \`export const runtime\`.</div>
+            \`----",
+           "stack": [],
+         }
+        `)
       }
     } else {
       const { cliOutput } = await next.build()
@@ -55,20 +76,40 @@ describe('use-cache-segment-configs', () => {
 
       if (isTurbopack) {
         expect(buildOutput).toMatchInlineSnapshot(`
-         "Error: Turbopack build failed with 1 errors:
-         Page: {"type":"app","side":"server","page":"/runtime/page"}
+         "Error: Turbopack build failed with 1 error:
          ./app/runtime/page.tsx:1:14
-         Ecmascript file had an error
+         Error: Route segment config "runtime" is not compatible with \`nextConfig.experimental.useCache\`. Please remove it.
          > 1 | export const runtime = 'edge'
              |              ^^^^^^^
            2 |
            3 | export default function Page() {
            4 |   return <div>This page uses \`export const runtime\`.</div>
 
-         Route segment config "runtime" is not compatible with \`nextConfig.experimental.useCache\`. Please remove it.
+         Ecmascript file had an error
 
 
-             at <unknown> (./app/runtime/page.tsx:1:14)
+             at ignore-listed frames
+         "
+        `)
+      } else if (isRspack) {
+        expect(buildOutput).toMatchInlineSnapshot(`
+         "
+         // TODO(veil): Fix broken import trace for Webpack loader resource.
+           ╰─▶   × Error:   x Route segment config "runtime" is not compatible with \`nextConfig.experimental.useCache\`. Please remove it.
+                 │    ,-[1:1]
+                 │  1 | export const runtime = 'edge'
+                 │    :              ^^^^^^^
+                 │  2 |
+                 │  3 | export default function Page() {
+                 │  4 |   return <div>This page uses \`export const runtime\`.</div>
+                 │    \`----
+                 │
+               
+         Import trace for requested module:
+         // TODO(veil): Fix broken import trace for Webpack loader resource.
+
+
+         > Build failed because of Rspack errors
          "
         `)
       } else {

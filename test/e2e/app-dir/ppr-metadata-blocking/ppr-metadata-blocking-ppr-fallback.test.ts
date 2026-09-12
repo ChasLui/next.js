@@ -4,17 +4,18 @@ function countSubstring(str: string, substr: string): number {
   return str.split(substr).length - 1
 }
 
-// The default ppr-metadata-blocking is covered by test/e2e/app-dir/ppr-metadata-streaming/ppr-metadata-streaming.test.ts
+// TODO(NAR-423): Migrate to Cache Components.
+// TODO(deploy-test-completion): Re-enable this suite in deploy mode.
+// Need to skip deployment because the test uses the private env cannot be used in deployment
+// @force-gate !deploy
+// @force-gate TODO
 describe('ppr-metadata-blocking-ppr-fallback', () => {
-  const { next, skipped } = nextTestSetup({
+  const { next } = nextTestSetup({
     files: __dirname,
-    skipDeployment: true,
     env: {
       __NEXT_EXPERIMENTAL_STATIC_SHELL_DEBUGGING: '1',
     },
   })
-
-  if (skipped) return
 
   it('should not include metadata in partial shell when page is fully dynamic', async () => {
     const $ = await next.render$('/fully-dynamic?__nextppronly=fallback')

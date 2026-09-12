@@ -1,43 +1,24 @@
-import React from 'react'
-import { renderToReadableStream } from 'react-dom/server.edge'
-import {
-  ServerInsertedMetadataContext,
-  type MetadataResolver,
-} from '../../../shared/lib/server-inserted-metadata.shared-runtime'
-import { renderToString } from '../render-to-string'
+import { htmlEscapeAttributeString } from '../../../shared/lib/htmlescape'
 
-export function createServerInsertedMetadata() {
-  let metadataResolver: MetadataResolver | null = null
-  let metadataToFlush: React.ReactNode = null
-  const setMetadataResolver = (resolver: MetadataResolver): void => {
-    metadataResolver = resolver
-  }
+/**
+ * For chromium based browsers (Chrome, Edge, etc.) and Safari,
+ * icons need to stay under <head> to be picked up by the browser.
+ *
+ */
+const REINSERT_ICON_SCRIPT = `\
+document.querySelectorAll('body link[rel="icon"], body link[rel="apple-touch-icon"]').forEach(el => document.head.appendChild(el))`
 
-  return {
-    ServerInsertedMetadataProvider: ({
-      children,
-    }: {
-      children: React.ReactNode
-    }) => {
-      return (
-        <ServerInsertedMetadataContext.Provider value={setMetadataResolver}>
-          {children}
-        </ServerInsertedMetadataContext.Provider>
-      )
-    },
+export function createServerInsertedMetadata(nonce: string | undefined) {
+  let inserted = false
 
-    async getServerInsertedMetadata(): Promise<string> {
-      if (!metadataResolver || metadataToFlush) {
-        return ''
-      }
+  return async function getServerInsertedMetadata(): Promise<string> {
+    if (inserted) {
+      return ''
+    }
 
-      metadataToFlush = metadataResolver()
-      const html = await renderToString({
-        renderToReadableStream,
-        element: <>{metadataToFlush}</>,
-      })
-
-      return html
-    },
+    inserted = true
+    return `<script${
+      nonce ? ` nonce="${htmlEscapeAttributeString(nonce)}"` : ''
+    }>${REINSERT_ICON_SCRIPT}</script>`
   }
 }
